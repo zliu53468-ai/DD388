@@ -589,8 +589,10 @@ def train_and_save_models(history_data):
             X_features_scaled.shape[1], num_classes)
         lgb_model.fit(X_features_scaled, y_labels,
                       sample_weight=sample_weights_array)
+        # 保存 Booster
         lgb_model.booster_.save_model(MODEL_FILE_LIGHTGBM)
-        ml_model_lightgbm = lgb_model
+        # 將記憶體中的模型也維持為 Booster（與載入時一致）
+        ml_model_lightgbm = lgb_model.booster_
         print("LightGBM 模型已成功訓練並保存。")
     except Exception as e:
         print(f"LightGBM 模型訓練失敗: {e}")
@@ -671,7 +673,7 @@ def load_ml_models():
         print(f"載入特徵縮放器失敗: {e}")
         feature_scaler = StandardScaler()
 
-    # 載入 LightGBM 模型
+    # 載入 LightGBM 模型（Booster）
     try:
         if os.path.exists(MODEL_FILE_LIGHTGBM):
             ml_model_lightgbm = lgb.Booster(model_file=MODEL_FILE_LIGHTGBM)
@@ -682,7 +684,7 @@ def load_ml_models():
         print(f"載入 LightGBM 模型失敗: {e}")
         ml_model_lightgbm = None
 
-    # 載入 XGBoost 模型
+    # 載入 XGBoost 模型（XGBClassifier）
     try:
         if os.path.exists(MODEL_FILE_XGBOOST):
             ml_model_xgboost = xgb.XGBClassifier(
@@ -775,16 +777,19 @@ def predict_next_outcome(history_data):
         print(
             f"歷史數據不足 ({len(history_data)} 筆) 以準備樹模型特徵。最低要求: {min_predict_history_tree_models}。")
 
-    # --- LightGBM 預測 ---
+    # --- LightGBM 預測（Booster）---
     if ml_model_lightgbm is not None and features_scaled is not None:
         try:
-            # 修正: 使用 Booster 預測並轉換為概率
-            lgb_raw_pred = ml_model_lightgbm.predict(features_scaled)
-            # 將 raw score 轉換為概率 (softmax)
-            lgb_probs = np.exp(lgb_raw_pred) / np.sum(np.exp(lgb_raw_pred), axis=1, keepdims=True)
-            lgb_probs = lgb_probs[0]  # 取第一個樣本的預測
-            
-            lgb_predicted_label_index = np.argmax(lgb_probs)
+            lgb_pred = ml_model_lightgbm.predict(features_scaled)  # 期望 shape: (1, num_class)
+            lgb_probs = lgb_pred[0] if isinstance(lgb_pred, np.ndarray) else np.array(lgb_pred)
+
+            # 若不是機率（總和不近似 1 或出現負值/大於1），再做 softmax 正規化
+            if (np.any(lgb_probs < 0) or np.any(lgb_probs > 1) or
+                not np.isclose(np.sum(lgb_probs), 1.0, atol=1e-3)):
+                exp_scores = np.exp(lgb_probs - np.max(lgb_probs))
+                lgb_probs = exp_scores / np.sum(exp_scores)
+
+            lgb_predicted_label_index = int(np.argmax(lgb_probs))
             lgb_predicted_outcome = ml_label_encoder.inverse_transform([lgb_predicted_label_index])[0]
 
             lgb_outcome_probabilities = {
@@ -804,7 +809,7 @@ def predict_next_outcome(history_data):
     if ml_model_xgboost is not None and features_scaled is not None:
         try:
             xgb_probs = ml_model_xgboost.predict_proba(features_scaled)[0]
-            xgb_predicted_label_index = np.argmax(xgb_probs)
+            xgb_predicted_label_index = int(np.argmax(xgb_probs))
             xgb_predicted_outcome = ml_label_encoder.inverse_transform(
                 [xgb_predicted_label_index])[0]
 
@@ -941,168 +946,4 @@ def train_model_endpoint():
 
 # 歷史記錄 API 路由
 @app.route('/api/history', methods=['GET', 'POST', 'DELETE'])
-def handle_history_api():
-    global game_history_backend, ai_prediction_outcomes_backend # 管理 ai_prediction_outcomes_backend 的更新
-    
-    try:
-        if request.method == 'POST':
-            data = request.get_json()
-            if not data:
-                return jsonify({"error": "請提供 JSON 數據"}), 400
-            
-            new_history_entry = data.get('result') # 預期新的歷史結果 (B, P, T)
-            ai_prediction_was_correct = data.get('aiCorrect', None) # 預期 AI 預測是否正確
-            
-            if not new_history_entry:
-                return jsonify({"error": "請提供 'result' 參數。"}), 400
-
-            new_history_entry = new_history_entry.upper()
-            if new_history_entry not in ['B', 'P', 'T']:
-                return jsonify({"error": "結果必須是 'B', 'P' 或 'T'。"}), 400
-
-            game_history_backend.append(new_history_entry)
-            
-            # 儲存 AI 預測是否正確的結果
-            if ai_prediction_was_correct is not None:
-                ai_prediction_outcomes_backend.append(bool(ai_prediction_was_correct))
-            else:
-                ai_prediction_outcomes_backend.append(None) # 如果沒有提供，則為 None
-
-            # 每次更新歷史記錄後重新訓練模型和馬可夫鏈
-            # 注意: 在生產環境中可能需要更複雜的觸發機制或定時訓練
-            train_and_save_models(game_history_backend)
-
-            return jsonify({
-                "message": "遊戲歷史已保存。",
-                "current_history_length": len(game_history_backend)
-            }), 200
-
-        elif request.method == 'GET':
-            return jsonify({
-                "history": game_history_backend,
-                "aiPredictionOutcomes": ai_prediction_outcomes_backend
-            }), 200
-
-        elif request.method == 'DELETE':
-            game_history_backend = []
-            ai_prediction_outcomes_backend = [] # 清空 AI 預測結果歷史
-            # 清空後，也應該清除模型檔案，以便下次從頭訓練
-            for model_file in [MODEL_FILE_XGBOOST, MODEL_FILE_LIGHTGBM, MODEL_FILE_ENCODER, MODEL_FILE_SCALER]:
-                if os.path.exists(model_file):
-                    os.remove(model_file)
-                    print(f"已刪除模型檔案: {model_file}")
-            # 重新初始化模型狀態，使其回到未訓練狀態
-            initialize_models()
-            print("模型檔案已清除，模型狀態已重置。")
-
-            # 重置馬可夫鏈模型
-            global markov_chain_model
-            markov_chain_model = defaultdict(lambda: defaultdict(int))
-            print("馬可夫鏈模型已重置。")
-
-            return jsonify({"message": "遊戲歷史和模型檔案已清除。"}), 200
-
-    except Exception as e:
-        print(f"handle_history_api 路由發生錯誤: {e}")
-        return jsonify({"error": f"伺服器錯誤: {str(e)}"}), 500
-
-@app.route('/recommendation', methods=['POST'])
-def recommendation():
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "請提供 JSON 數據"}), 400
-
-        history = data.get('history', [])
-        history = [h.upper() for h in history]
-
-        if not history:
-            return jsonify({"error": "請提供歷史數據。"}), 400
-
-        prediction_result = predict_next_outcome(history)
-        
-        # 提取概率
-        probabilities = prediction_result.get('probabilities', {'B': 1/3, 'P': 1/3, 'T': 1/3})
-        
-        # 推薦邏輯
-        # 考慮高於某個閾值的預測，例如 0.45 或 0.5
-        # 如果沒有足夠高的信心，建議觀望
-        recommendation_text = "觀望"
-        predicted_outcome = prediction_result.get('prediction', '觀望')
-        confidence = prediction_result.get('confidence', 1/3)
-
-        if predicted_outcome != '觀望' and confidence >= 0.45: # 調整信心度閾值
-            if predicted_outcome == 'B':
-                recommendation_text = "建議下注：莊家"
-            elif predicted_outcome == 'P':
-                recommendation_text = "建議下注：閒家"
-            elif predicted_outcome == 'T':
-                # 對於和局的推薦要特別謹慎，通常不單獨推薦下注和
-                recommendation_text = "預測為和局，但通常建議觀望。"
-
-        return jsonify({
-            "recommendation": recommendation_text,
-            "prediction_details": prediction_result
-        })
-    except Exception as e:
-        print(f"recommendation 路由發生錯誤: {e}")
-        return jsonify({"error": f"伺服器錯誤: {str(e)}"}), 500
-
-@app.route('/status', methods=['GET'])
-def get_status():
-    """提供 API 和模型載入狀態。"""
-    model_loaded = (ml_model_lightgbm is not None or ml_model_xgboost is not None)
-    encoder_loaded = (ml_label_encoder is not None and hasattr(ml_label_encoder, 'classes_'))
-    scaler_loaded = (feature_scaler is not None and hasattr(feature_scaler, 'mean_')) # 檢查是否已 fit
-
-    status_message = {
-        "api_status": "運行中",
-        "models_loaded": model_loaded,
-        "lightgbm_model_status": "已載入" if ml_model_lightgbm else "未載入",
-        "xgboost_model_status": "已載入" if ml_model_xgboost else "未載入",
-        "label_encoder_status": "已載入並Fit" if encoder_loaded else "未載入或未Fit",
-        "feature_scaler_status": "已載入並Fit" if scaler_loaded else "未載入或未Fit",
-        "current_history_length": len(game_history_backend)
-    }
-    return jsonify(status_message)
-
-@app.route('/stats', methods=['GET'])
-def get_stats():
-    """提供基於當前歷史的快速統計數據。"""
-    if not game_history_backend:
-        return jsonify({"message": "目前沒有遊戲歷史紀錄來計算統計數據。"}), 200
-
-    total_games = len(game_history_backend)
-    b_count = game_history_backend.count('B')
-    p_count = game_history_backend.count('P')
-    t_count = game_history_backend.count('T')
-
-    # 計算AI預測正確率
-    ai_correct_count = 0
-    total_ai_predictions = 0
-    for outcome in ai_prediction_outcomes_backend:
-        if outcome is not None:
-            total_ai_predictions += 1
-            if outcome:
-                ai_correct_count += 1
-    
-    ai_accuracy = (ai_correct_count / total_ai_predictions) if total_ai_predictions > 0 else 0.0
-
-    stats = {
-        "totalGames": total_games,
-        "bankerCount": b_count,
-        "playerCount": p_count,
-        "tieCount": t_count,
-        "bankerRatio": f"{b_count / total_games:.2f}",
-        "playerRatio": f"{p_count / total_games:.2f}",
-        "tieRatio": f"{t_count / total_games:.2f}",
-        "aiPredictionAccuracy": f"{ai_accuracy:.2f}"
-    }
-    return jsonify(stats)
-
-if __name__ == '__main__':
-    # 在 Codesandbox 中，通常會使用 `gunicorn` 或類似的 WSGI 服務器來運行 Flask。
-    # 如果您直接運行此文件，則使用 Flask 自帶的服務器。
-    # 注意：Flask 自帶的服務器不適合生產環境。
-    app.run(debug=True, host='0.0.0.0', port=5000)
-
+def handle_history_api
