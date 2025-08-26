@@ -14,16 +14,9 @@ from sklearn.utils.class_weight import compute_class_weight
 
 app = Flask(__name__)
 
-# ====== CORS 配置 (已更新為支援 GitHub Pages 的明確來源) ======
-# 請將 'https://your-github-username.github.io' 替換為您實際的 GitHub Pages 網址！
-CORS(app, origins=[
-    "https://cdpn.io",
-    "https://*.codepen.io",
-    "https://*.codesandbox.io",
-    "https://zliu53468-ai.github.io", # <--- 已替換為您的 GitHub Pages 網址
-    "http://localhost:*",
-    "http://127.0.0.1:*"
-], methods=["GET", "POST", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "Authorization"])
+# ====== CORS 配置 (已更新為支援所有來源，開發環境適用) ======
+# 注意：在生產環境中，請將 "origins=["*"]" 替換為您信任的特定前端網址列表，以確保安全。
+CORS(app, origins=["*"], methods=["GET", "POST", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "Authorization"])
 
 
 # 全域變數 - 模型和標籤編碼器
@@ -1112,3 +1105,4 @@ if __name__ == '__main__':
     # 如果您直接運行此文件，則使用 Flask 自帶的服務器。
     # 注意：Flask 自帶的服務器不適合生產環境。
     app.run(debug=True, host='0.0.0.0', port=5000)
+
