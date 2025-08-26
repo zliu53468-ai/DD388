@@ -121,28 +121,35 @@ def _get_big_road_map(history_data):
                     road_map[r][c]['ties'] += 1
                 continue
 
-            # 處理 B 或 P - 重置邏輯修正
+            # 處理 B 或 P - 修正大路繪製邏輯
             if not last_bp_result: # 第一個 B 或 P
                 # 重置到起始位置
                 col = 0
                 row = 0
-            elif current_result == last_bp_result: # 連續相同
-                if row < 5: # 向下移動
-                    row += 1
-                else: # 換到下一列, 繼續在第6行(索引5)繪製，這是標準龍尾
+                road_map[row][col]['result'] = current_result
+                last_bp_result = current_result
+                last_bp_position = (row, col)
+            else:
+                # 檢查是否與上一個結果相同
+                if current_result == last_bp_result:
+                    # 相同結果：向下移動一行
+                    if row < 5: # 如果還沒到底部
+                        row += 1
+                    else: # 如果已經在底部，換到下一列並從頂部開始
+                        col += 1
+                        row = 0
+                else:
+                    # 不同結果：換到下一列並從頂部開始
                     col += 1
-                    row = 5 # 保持在底部
-            else: # 結果改變
-                col += 1
-                row = 0
-            
-            # 確保不超出範圍
-            if col >= 100:
-                break
-            
-            road_map[row][col]['result'] = current_result
-            last_bp_result = current_result
-            last_bp_position = (row, col)
+                    row = 0
+                
+                # 確保不超出範圍
+                if col >= 100:
+                    break
+                
+                road_map[row][col]['result'] = current_result
+                last_bp_result = current_result
+                last_bp_position = (row, col)
         
         # 清理多餘的空列
         final_cols = 0
@@ -725,7 +732,6 @@ def initialize_models():
         except Exception as fit_e:
             print(f"假 fit 失敗: {fit_e}")
 
-
 # === 為了兼容 Codesandbox 環境，我們將初始化邏輯在 app 實例創建後立即執行一次 ===
 initialize_models() # 在應用程式啟動時執行一次模型初始化
 
@@ -951,112 +957,64 @@ def handle_history_api():
             if not data:
                 return jsonify({"error": "請提供 JSON 數據"}), 400
             
-            game_history_backend = data.get('history', []) # 只更新遊戲歷史
-            # ai_accuracy_history 不再從前端接收，由後端自己的 /api/record_ai_performance 管理
+            new_history_entry = data.get('result') # 預期新的歷史結果 (B, P, T)
+            ai_prediction_was_correct = data.get('aiCorrect', None) # 預期 AI 預測是否正確
+            
+            if not new_history_entry:
+                return jsonify({"error": "請提供 'result' 參數。"}), 400
 
-            min_train_history = LOOK_BACK + 1
-            if len(game_history_backend) >= min_train_history:
-                train_and_save_models(game_history_backend)
-                print(
-                    f"Received history from frontend: {len(game_history_backend)} records. Models re-trained.")
+            new_history_entry = new_history_entry.upper()
+            if new_history_entry not in ['B', 'P', 'T']:
+                return jsonify({"error": "結果必須是 'B', 'P' 或 'T'。"}), 400
+
+            game_history_backend.append(new_history_entry)
+            
+            # 儲存 AI 預測是否正確的結果
+            if ai_prediction_was_correct is not None:
+                ai_prediction_outcomes_backend.append(bool(ai_prediction_was_correct))
             else:
-                update_markov_chain(game_history_backend)
-                print(
-                    f"Received history from frontend: {len(game_history_backend)} records. Not enough for tree models, Markov chain updated.")
+                ai_prediction_outcomes_backend.append(None) # 如果沒有提供，則為 None
 
-            return jsonify({"message": "History saved and models updated successfully", "records": len(game_history_backend)}), 200
+            # 每次更新歷史記錄後重新訓練模型和馬可夫鏈
+            # 注意: 在生產環境中可能需要更複雜的觸發機制或定時訓練
+            train_and_save_models(game_history_backend)
+
+            return jsonify({
+                "message": "遊戲歷史已保存。",
+                "current_history_length": len(game_history_backend)
+            }), 200
+
         elif request.method == 'GET':
-            # 返回 JSON 物件
-            return jsonify({"history": game_history_backend, "ai_accuracy_history": ai_prediction_outcomes_backend}), 200
+            return jsonify({
+                "history": game_history_backend,
+                "aiPredictionOutcomes": ai_prediction_outcomes_backend
+            }), 200
+
         elif request.method == 'DELETE':
             game_history_backend = []
-            ai_prediction_outcomes_backend = [] # 清除 AI 準確率歷史
-            initialize_models()  # 清除歷史後，重新初始化模型
-            print("History cleared from backend, models re-initialized.")
-            return jsonify({"message": "History and AI accuracy history cleared and models re-initialized successfully"}), 200
-        return jsonify({"error": "Method not allowed"}), 405
+            ai_prediction_outcomes_backend = [] # 清空 AI 預測結果歷史
+            # 清空後，也應該清除模型檔案，以便下次從頭訓練
+            for model_file in [MODEL_FILE_XGBOOST, MODEL_FILE_LIGHTGBM, MODEL_FILE_ENCODER, MODEL_FILE_SCALER]:
+                if os.path.exists(model_file):
+                    os.remove(model_file)
+                    print(f"已刪除模型檔案: {model_file}")
+            # 重新初始化模型狀態，使其回到未訓練狀態
+            initialize_models()
+            print("模型檔案已清除，模型狀態已重置。")
+
+            # 重置馬可夫鏈模型
+            global markov_chain_model
+            markov_chain_model = defaultdict(lambda: defaultdict(int))
+            print("馬可夫鏈模型已重置。")
+
+            return jsonify({"message": "遊戲歷史和模型檔案已清除。"}), 200
+
     except Exception as e:
-        print(f"/api/history 路由發生錯誤: {e}")
+        print(f"handle_history_api 路由發生錯誤: {e}")
         return jsonify({"error": f"伺服器錯誤: {str(e)}"}), 500
-
-# --- 新增 AI 預測表現記錄端點 ---
-@app.route('/api/record_ai_performance', methods=['POST', 'DELETE'])
-def record_ai_performance():
-    global ai_prediction_outcomes_backend
-
-    try:
-        if request.method == 'POST':
-            data = request.get_json()
-            if not data:
-                return jsonify({"error": "請提供 JSON 數據"}), 400
-            
-            actual_result = data.get('actual_result')
-            ai_predicted_outcome = data.get('ai_predicted_outcome')
-            
-            if not actual_result or not ai_predicted_outcome:
-                return jsonify({"error": "請提供 actual_result 和 ai_predicted_outcome"}), 400
-            
-            # 只在 AI 預測是 B 或 P 時才記錄準確性
-            if ai_predicted_outcome in ['B', 'P']:
-                is_correct = (actual_result == ai_predicted_outcome)
-                ai_prediction_outcomes_backend.append(is_correct)
-                print(f"Recorded AI performance: Actual={actual_result}, Predicted={ai_predicted_outcome}, Correct={is_correct}")
-                return jsonify({"message": "AI performance recorded", "is_correct": is_correct}), 200
-            else:
-                print(f"Skipping AI performance record: AI predicted {ai_predicted_outcome}")
-                return jsonify({"message": "AI prediction not for B/P, skipping record"}), 200
-        
-        elif request.method == 'DELETE': # 處理撤銷操作
-            if ai_prediction_outcomes_backend:
-                ai_prediction_outcomes_backend.pop()
-                print("Last AI performance record undone.")
-                return jsonify({"message": "Last AI performance record undone"}), 200
-            else:
-                return jsonify({"message": "No AI performance record to undo"}), 404
-        
-        return jsonify({"error": "Method not allowed"}), 405
-    except Exception as e:
-        print(f"/api/record_ai_performance 路由發生錯誤: {e}")
-        return jsonify({"error": f"伺服器錯誤: {str(e)}"}), 500
-
-
-@app.route('/status', methods=['GET'])
-def status():
-    try:
-        model_xgboost_loaded = ml_model_xgboost is not None
-        model_lightgbm_loaded = ml_model_lightgbm is not None 
-        encoder_loaded = ml_label_encoder is not None
-        scaler_loaded = feature_scaler is not None and hasattr(
-            feature_scaler, 'n_features_in_') and feature_scaler.n_features_in_ is not None
-
-        return jsonify({
-            "xgboost_model_loaded": model_xgboost_loaded,
-            "lightgbm_model_loaded": model_lightgbm_loaded,
-            "encoder_loaded": encoder_loaded,
-            "scaler_loaded": scaler_loaded,
-            "xgboost_model_file_exists": os.path.exists(MODEL_FILE_XGBOOST),
-            "lightgbm_model_file_exists": os.path.exists(MODEL_FILE_LIGHTGBM),
-            "encoder_file_exists": os.path.exists(MODEL_FILE_ENCODER),
-            "scaler_file_exists": os.path.exists(MODEL_FILE_SCALER),
-            "look_back_length": LOOK_BACK,
-            "current_history_length": len(game_history_backend),
-            "ai_performance_records": len(ai_prediction_outcomes_backend) # 新增 AI 表現記錄數
-        })
-    except Exception as e:
-        print(f"status 路由發生錯誤: {e}")
-        return jsonify({"error": f"伺服器錯誤: {str(e)}"}), 500
-
-# Constants for room detection in backend
-ROOM_ACCURACY_WINDOW = 15  # Calculate AI accuracy over last X games
-ROOM_CHANGE_THRESHOLD = 0.40  # Below this, suggest changing room
-ROOM_WARNING_THRESHOLD = 0.55  # Below this, warn about performance
-
 
 @app.route('/recommendation', methods=['POST'])
-def get_recommendation():
-    """提供下注建議，考慮風險和回報，並增加房間偵測。"""
-    global ai_prediction_outcomes_backend # 確保能訪問全局變量
-
+def recommendation():
     try:
         data = request.get_json()
         if not data:
@@ -1064,131 +1022,93 @@ def get_recommendation():
 
         history = data.get('history', [])
         history = [h.upper() for h in history]
-        
+
         if not history:
             return jsonify({"error": "請提供歷史數據。"}), 400
-        
+
         prediction_result = predict_next_outcome(history)
         
-        if isinstance(prediction_result, str):  # 如果 predict_next_outcome 返回的是錯誤訊息字串
-            return jsonify({"error": prediction_result}), 400
+        # 提取概率
+        probabilities = prediction_result.get('probabilities', {'B': 1/3, 'P': 1/3, 'T': 1/3})
         
-        prediction = prediction_result["prediction"]
-        probabilities = prediction_result["probabilities"]
-        confidence = prediction_result["confidence"]
-        source_model = prediction_result.get("source", "unknown")
+        # 推薦邏輯
+        # 考慮高於某個閾值的預測，例如 0.45 或 0.5
+        # 如果沒有足夠高的信心，建議觀望
+        recommendation_text = "觀望"
+        predicted_outcome = prediction_result.get('prediction', '觀望')
+        confidence = prediction_result.get('confidence', 1/3)
 
-        recommendation = "建議觀望，市場不明確"
-        bet_amount = "不下注"
-
-        if prediction != "觀望" and confidence >= 0.4:
-            # 找到機率最高的結果
-            highest_prob_outcome = max(probabilities, key=probabilities.get)
-            
-            # 判斷下注建議等級
-            if confidence < 0.6:
-                recommendation = f"輕度看好 {highest_prob_outcome} (來源: {source_model})，但風險較高"
-                bet_amount = "小注"
-            elif confidence < 0.8:
-                recommendation = f"中度看好 {highest_prob_outcome} (來源: {source_model})"
-                bet_amount = "中等注碼"
-            else:
-                recommendation = f"強烈看好 {highest_prob_outcome} (來源: {source_model})"
-                bet_amount = "大注"
-
-        # --- 新增房間偵測邏輯 (直接使用後端維護的 ai_prediction_outcomes_backend) ---
-        room_accuracy_percentage = 0.0
-        room_status_text = "AI 表現良好"
-        room_status_class = "room-good"
-
-        if len(ai_prediction_outcomes_backend) >= ROOM_ACCURACY_WINDOW:
-            recent_outcomes = ai_prediction_outcomes_backend[-ROOM_ACCURACY_WINDOW:]
-            correct_count = sum(1 for x in recent_outcomes if x is True) # Count True values
-            room_accuracy_percentage = correct_count / len(recent_outcomes)
-
-            if room_accuracy_percentage < ROOM_CHANGE_THRESHOLD:
-                room_status_text = "建議換房，AI預測表現不佳。"
-                room_status_class = "room-bad"
-            elif room_accuracy_percentage < ROOM_WARNING_THRESHOLD:
-                room_status_text = "AI 表現中等，請持續觀察。"
-                room_status_class = "room-warning"
-            else:
-                room_status_text = "AI 表現良好"
-                room_status_class = "room-good"
-        elif len(ai_prediction_outcomes_backend) > 0: # Not enough for full window, but some data
-            correct_count = sum(1 for x in ai_prediction_outcomes_backend if x is True)
-            room_accuracy_percentage = correct_count / len(ai_prediction_outcomes_backend)
-            if room_accuracy_percentage < ROOM_CHANGE_THRESHOLD:
-                room_status_text = "AI 表現不佳。"
-                room_status_class = "room-bad"
-            else:
-                room_status_text = "AI 表現良好 (數據較少)"
-                room_status_class = "room-good"
-        else:
-            room_status_text = "AI 表現良好 (無數據)"
-            room_status_class = "room-good"
-
+        if predicted_outcome != '觀望' and confidence >= 0.45: # 調整信心度閾值
+            if predicted_outcome == 'B':
+                recommendation_text = "建議下注：莊家"
+            elif predicted_outcome == 'P':
+                recommendation_text = "建議下注：閒家"
+            elif predicted_outcome == 'T':
+                # 對於和局的推薦要特別謹慎，通常不單獨推薦下注和
+                recommendation_text = "預測為和局，但通常建議觀望。"
 
         return jsonify({
-            "prediction": prediction,
-            "probabilities": probabilities,
-            "confidence": confidence,
-            "recommendation": recommendation,
-            "bet_amount": bet_amount,
-            "source_model": source_model,
-            "room_accuracy_percentage": round(room_accuracy_percentage * 100, 1), # Return as percentage
-            "room_status_text": room_status_text,
-            "room_status_class": room_status_class,
-            "room_accuracy_window": ROOM_ACCURACY_WINDOW # Pass window size for frontend display
+            "recommendation": recommendation_text,
+            "prediction_details": prediction_result
         })
     except Exception as e:
         print(f"recommendation 路由發生錯誤: {e}")
         return jsonify({"error": f"伺服器錯誤: {str(e)}"}), 500
 
+@app.route('/status', methods=['GET'])
+def get_status():
+    """提供 API 和模型載入狀態。"""
+    model_loaded = (ml_model_lightgbm is not None or ml_model_xgboost is not None)
+    encoder_loaded = (ml_label_encoder is not None and hasattr(ml_label_encoder, 'classes_'))
+    scaler_loaded = (feature_scaler is not None and hasattr(feature_scaler, 'mean_')) # 檢查是否已 fit
+
+    status_message = {
+        "api_status": "運行中",
+        "models_loaded": model_loaded,
+        "lightgbm_model_status": "已載入" if ml_model_lightgbm else "未載入",
+        "xgboost_model_status": "已載入" if ml_model_xgboost else "未載入",
+        "label_encoder_status": "已載入並Fit" if encoder_loaded else "未載入或未Fit",
+        "feature_scaler_status": "已載入並Fit" if scaler_loaded else "未載入或未Fit",
+        "current_history_length": len(game_history_backend)
+    }
+    return jsonify(status_message)
+
 @app.route('/stats', methods=['GET'])
 def get_stats():
-    """快速統計接口"""
-    try:
-        total = len(game_history_backend)
-        banker_count = game_history_backend.count('B')
-        player_count = game_history_backend.count('P')
-        tie_count = game_history_backend.count('T')
-        
-        return jsonify({
-            "total_games": total,
-            "banker_wins": banker_count,
-            "player_wins": player_count,
-            "ties": tie_count,
-            "banker_ratio": round(banker_count / total, 3) if total > 0 else 0,
-            "player_ratio": round(player_count / total, 3) if total > 0 else 0,
-            "tie_ratio": round(tie_count / total, 3) if total > 0 else 0,
-        })
-    except Exception as e:
-        print(f"stats 路由發生錯誤: {e}")
-        return jsonify({"error": f"伺服器錯誤: {str(e)}"}), 500
+    """提供基於當前歷史的快速統計數據。"""
+    if not game_history_backend:
+        return jsonify({"message": "目前沒有遊戲歷史紀錄來計算統計數據。"}), 200
 
+    total_games = len(game_history_backend)
+    b_count = game_history_backend.count('B')
+    p_count = game_history_backend.count('P')
+    t_count = game_history_backend.count('T')
 
-@app.route('/api/bigroad', methods=['POST'])
-def get_bigroad():
-    """從前端獲取歷史數據並返回大路地圖。"""
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "請提供 JSON 數據"}), 400
-        history = data.get('history', [])
-        history = [h.upper() for h in history]
+    # 計算AI預測正確率
+    ai_correct_count = 0
+    total_ai_predictions = 0
+    for outcome in ai_prediction_outcomes_backend:
+        if outcome is not None:
+            total_ai_predictions += 1
+            if outcome:
+                ai_correct_count += 1
+    
+    ai_accuracy = (ai_correct_count / total_ai_predictions) if total_ai_predictions > 0 else 0.0
 
-        if not history:
-            return jsonify({"error": "請提供歷史數據以生成大路圖。"}), 400
-
-        bigroad_map = _get_big_road_map(history)
-        # 返回一個 JSON 格式的二維列表
-        return jsonify({"big_road_map": bigroad_map}), 200
-    except Exception as e:
-        print(f"/api/bigroad 路由發生錯誤: {e}")
-        return jsonify({"error": f"伺服器錯誤: {str(e)}"}), 500
-
+    stats = {
+        "totalGames": total_games,
+        "bankerCount": b_count,
+        "playerCount": p_count,
+        "tieCount": t_count,
+        "bankerRatio": f"{b_count / total_games:.2f}",
+        "playerRatio": f"{p_count / total_games:.2f}",
+        "tieRatio": f"{t_count / total_games:.2f}",
+        "aiPredictionAccuracy": f"{ai_accuracy:.2f}"
+    }
+    return jsonify(stats)
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    # 在 Codesandbox 中，通常會使用 `gunicorn` 或類似的 WSGI 服務器來運行 Flask。
+    # 如果您直接運行此文件，則使用 Flask 自帶的服務器。
+    # 注意：Flask 自帶的服務器不適合生產環境。
+    app.run(debug=True, host='0.0.0.0', port=5000)
