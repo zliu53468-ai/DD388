@@ -14,11 +14,13 @@ from sklearn.utils.class_weight import compute_class_weight
 
 app = Flask(__name__)
 
-# ====== CORS 配置 (保持兼容CodePen/Codesandbox子域名) ======
+# ====== CORS 配置 (已更新為支援 GitHub Pages 的明確來源) ======
+# 請將 'https://your-github-username.github.io' 替換為您實際的 GitHub Pages 網址！
 CORS(app, origins=[
     "https://cdpn.io",
     "https://*.codepen.io",
     "https://*.codesandbox.io",
+    "https://zliu53468-ai.github.io", # <--- 已替換為您的 GitHub Pages 網址
     "http://localhost:*",
     "http://127.0.0.1:*"
 ], methods=["GET", "POST", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "Authorization"])
@@ -36,12 +38,13 @@ MODEL_FILE_LIGHTGBM = 'baccarat_ml_model_lightgbm.txt'
 MODEL_FILE_ENCODER = 'baccarat_ml_label_encoder.joblib'
 MODEL_FILE_SCALER = 'baccarat_ml_feature_scaler.joblib'
 
-LOOK_BACK = 20 # 已調整: 允許約20局後模型即可開始預測
-MARKOV_LOOK_BACK = 5 # 馬可夫鏈的回溯深度
+LOOK_BACK = 30 # 增加回溯步長以捕捉更多模式，特別是路紙模式
 game_history_backend = [] # 用於模擬後端歷史數據的全局變量
 ai_prediction_outcomes_backend = [] # 新增: 儲存AI預測在該局是否正確 (True/False)
 
+
 # --- 馬可夫鏈模型 ---
+MARKOV_LOOK_BACK = 5 # 調整馬可夫鏈的回溯深度
 markov_chain_model = defaultdict(lambda: defaultdict(int))
 
 def update_markov_chain(history_data):
@@ -546,7 +549,7 @@ def train_and_save_models(history_data):
     X_features, y_labels, current_label_encoder = prepare_training_data(
         history_data, LOOK_BACK)
 
-    if len(X_features) == 0 or len(y_labels) == 0:
+    if len(X_features) == 0 or len(y_labels) == 0: # 確保有足夠的數據進行訓練
         return False, "訓練數據不足，無法有效訓練。"
 
     ml_label_encoder = current_label_encoder
@@ -714,9 +717,13 @@ def initialize_models():
             dummy_history = ['B'] * LOOK_BACK
             dummy_features = prepare_simplified_features(dummy_history)
             if dummy_features is not None:
+                feature_scaler = StandardScaler()  # 確保是一個新的實例
                 feature_scaler.fit(np.zeros((1, dummy_features.shape[0])))
+                print("未訓練的特徵縮放器已初始化並執行假 fit。")
+            else:
+                print("無法生成 dummy features，未訓練的特徵縮放器無法執行假 fit。")
         except Exception as fit_e:
-            print(f"初始化 Scaler 假 fit 失敗: {fit_e}")
+            print(f"假 fit 失敗: {fit_e}")
 
 
 # === 為了兼容 Codesandbox 環境，我們將初始化邏輯在 app 實例創建後立即執行一次 ===
@@ -1017,7 +1024,7 @@ def record_ai_performance():
 def status():
     try:
         model_xgboost_loaded = ml_model_xgboost is not None
-        model_lightgbm_loaded = ml_model_lightgbm is not None # 修正：將 ml_model_model_lightgbm 改為 ml_model_lightgbm
+        model_lightgbm_loaded = ml_model_lightgbm is not None 
         encoder_loaded = ml_label_encoder is not None
         scaler_loaded = feature_scaler is not None and hasattr(
             feature_scaler, 'n_features_in_') and feature_scaler.n_features_in_ is not None
@@ -1175,7 +1182,7 @@ def get_bigroad():
             return jsonify({"error": "請提供歷史數據以生成大路圖。"}), 400
 
         bigroad_map = _get_big_road_map(history)
-        # 返回一個 JSON 物件，其中包含大路地圖
+        # 返回一個 JSON 格式的二維列表
         return jsonify({"big_road_map": bigroad_map}), 200
     except Exception as e:
         print(f"/api/bigroad 路由發生錯誤: {e}")
