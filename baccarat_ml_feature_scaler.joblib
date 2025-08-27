@@ -1,0 +1,9 @@
+from sklearn.preprocessing import StandardScaler
+import joblib
+
+# 假設 X 是原始特徵
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# 儲存 scaler
+joblib.dump(scaler, "baccarat_ml_feature_scaler.joblib")
