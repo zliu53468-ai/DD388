@@ -1,0 +1,9 @@
+from sklearn.preprocessing import LabelEncoder
+import joblib
+
+# 假設 y 是原始標籤
+encoder = LabelEncoder()
+y_encoded = encoder.fit_transform(y)
+
+# 儲存 encoder
+joblib.dump(encoder, "baccarat_ml_label_encoder.joblib")
