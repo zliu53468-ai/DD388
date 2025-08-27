@@ -5,3 +5,4 @@ xgboost
 lightgbm
 scikit-learn
 joblib
+gunicorn
