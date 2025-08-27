@@ -1,0 +1,11 @@
+import os, json
+
+model_path = os.path.join(os.path.dirname(__file__), "models", "baccarat_ml_model_xgboost.json")
+
+if not os.path.exists(model_path):
+    raise FileNotFoundError(f"模型檔不存在：{model_path}")
+
+with open(model_path, "r", encoding="utf-8") as f:
+    model_data = json.load(f)
+
+print("模型載入成功")
