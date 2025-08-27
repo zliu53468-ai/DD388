@@ -23,11 +23,12 @@ game_history_backend = []
 def load_models():
     global xgb_model, lgb_model, label_encoder, scaler
     try:
+        # 使用 os.path.join 來確保路徑正確
         xgb_model = xgb.Booster()
-        xgb_model.load_model(XGB_MODEL_PATH)
-        lgb_model = lgb.Booster(model_file=LGB_MODEL_PATH)
-        label_encoder = joblib.load(LABEL_ENCODER_PATH)
-        scaler = joblib.load(SCALER_PATH)
+        xgb_model.load_model(os.path.join(os.path.dirname(__file__), XGB_MODEL_PATH))
+        lgb_model = lgb.Booster(model_file=os.path.join(os.path.dirname(__file__), LGB_MODEL_PATH))
+        label_encoder = joblib.load(os.path.join(os.path.dirname(__file__), LABEL_ENCODER_PATH))
+        scaler = joblib.load(os.path.join(os.path.dirname(__file__), SCALER_PATH))
         print("✅ 模型載入成功")
     except Exception as e:
         print("⚠️ 模型尚未訓練或載入失敗：", e)
@@ -73,7 +74,10 @@ def generate_big_road(history):
         road_map[row][col] = {"result": result, "ties": 0}
         last_bp, last_bp_pos = result, (row, col)
 
-    max_col = max(c for c in range(cols) if any(road_map[r][c] for r in range(rows)))
+    max_col = max(c for c in range(cols) if any(road_map[r][c] for r in range(rows))) if any(any(road_map[r][c] for r in range(rows)) for c in range(cols)) else -1
+    if max_col == -1:
+        return []
+
     trimmed_map = [row[:max_col + 1] for row in road_map]
 
     output = []
@@ -99,13 +103,13 @@ def status():
 @app.route("/predict", methods=["POST"])
 def predict():
     if not all([xgb_model, lgb_model, label_encoder, scaler]):
-        return jsonify({"error": "模型尚未訓練"}), 400
+        return jsonify({"error": "模型尚未訓練或載入失敗"}), 400
 
     req_data = request.get_json()
     if not req_data or "features" not in req_data:
         return jsonify({"error": "缺少 features"}), 400
 
-    features = np.array([req_data["features"]])
+    features = np.array([req_data["features"]], dtype=np.float64) # 修正：確保型別正確
     features_scaled = scaler.transform(features)
 
     try:
@@ -129,7 +133,7 @@ def train():
     if not req_data or "data" not in req_data:
         return jsonify({"error": "缺少訓練資料"}), 400
 
-    X = np.array([d["features"] for d in req_data["data"]])
+    X = np.array([d["features"] for d in req_data["data"]], dtype=np.float64) # 修正：確保型別正確
     y = np.array([d["label"] for d in req_data["data"]])
 
     label_encoder = LabelEncoder()
@@ -167,7 +171,7 @@ def handle_history_api():
         game_history_backend.clear()
         return jsonify({"message": "歷史已清空"})
 
-# 不用 debug=True，讓 gunicorn 接管
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+# 讓 Gunicorn 或其他 WSGI 伺服器來處理啟動
+# if __name__ == '__main__':
+#     port = int(os.environ.get("PORT", 5000))
+#     app.run(host='0.0.0.0', port=port)
