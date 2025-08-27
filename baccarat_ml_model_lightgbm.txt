@@ -1,0 +1,10 @@
+import lightgbm as lgb
+import pandas as pd
+import numpy as np
+
+# 假設你已經有訓練資料 X_train, y_train
+model = lgb.LGBMClassifier()
+model.fit(X_train, y_train)
+
+# 儲存模型
+model.booster_.save_model("baccarat_ml_model_lightgbm.txt")
