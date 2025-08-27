@@ -8,7 +8,7 @@ import lightgbm as lgb
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # 模型檔案路徑
 XGB_MODEL_PATH = "baccarat_ml_model_xgboost.json"
@@ -38,16 +38,12 @@ def load_models():
 
 load_models()
 
-# === 大路生成（支援列斜延伸 + 和局標記 + 前端可用結構） ===
+# === 大路生成 ===
 def generate_big_road(history):
-    rows = 6
-    cols = 100
+    rows, cols = 6, 100
     road_map = [[None for _ in range(cols)] for _ in range(rows)]
-
-    col = 0
-    row = 0
-    last_bp = None
-    last_bp_pos = None
+    col = row = 0
+    last_bp, last_bp_pos = None, None
 
     for result in history:
         if result == 'T':
@@ -61,8 +57,7 @@ def generate_big_road(history):
 
         if last_bp is None:
             road_map[row][col] = {"result": result, "ties": 0}
-            last_bp = result
-            last_bp_pos = (row, col)
+            last_bp, last_bp_pos = result, (row, col)
             continue
 
         if result == last_bp:
@@ -72,30 +67,21 @@ def generate_big_road(history):
                 col += 1
         else:
             if col + 1 < cols:
-                start_row = 0
-                if road_map[0][col + 1] is None and row < rows - 1 and road_map[row + 1][col] is None:
-                    start_row = row
-                row = start_row
+                row = 0
                 col += 1
 
         road_map[row][col] = {"result": result, "ties": 0}
-        last_bp = result
-        last_bp_pos = (row, col)
+        last_bp, last_bp_pos = result, (row, col)
 
-    max_col = 0
-    for c in range(cols):
-        if any(road_map[r][c] is not None for r in range(rows)):
-            max_col = c
+    max_col = max(c for c in range(cols) if any(road_map[r][c] for r in range(rows)))
     trimmed_map = [row[:max_col + 1] for row in road_map]
 
     output = []
     for r in range(rows):
-        for c in range(len(trimmed_map[r])):
-            cell = trimmed_map[r][c]
+        for c, cell in enumerate(trimmed_map[r]):
             if cell:
                 output.append({
-                    "row": r,
-                    "col": c,
+                    "row": r, "col": c,
                     "result": cell["result"],
                     "ties": cell["ties"]
                 })
@@ -115,30 +101,36 @@ def predict():
     if not all([xgb_model, lgb_model, label_encoder, scaler]):
         return jsonify({"error": "模型尚未訓練"}), 400
 
-    data = request.json.get("features")
-    if not data:
+    req_data = request.get_json()
+    if not req_data or "features" not in req_data:
         return jsonify({"error": "缺少 features"}), 400
 
-    X = np.array([data])
-    X_scaled = scaler.transform(X)
+    features = np.array([req_data["features"]])
+    features_scaled = scaler.transform(features)
 
-    xgb_pred = xgb_model.predict(xgb.DMatrix(X_scaled))
-    lgb_pred = lgb_model.predict(X_scaled)
+    try:
+        xgb_pred = xgb_model.predict(xgb.DMatrix(features_scaled))
+        lgb_pred = lgb_model.predict(features_scaled)
+    except Exception as e:
+        return jsonify({"error": f"預測錯誤: {str(e)}"}), 500
 
     xgb_label = label_encoder.inverse_transform([np.argmax(xgb_pred)])[0]
     lgb_label = label_encoder.inverse_transform([np.argmax(lgb_pred)])[0]
 
-    return jsonify({"xgboost": xgb_label, "lightgbm": lgb_label})
+    return jsonify({
+        "xgboost": xgb_label,
+        "lightgbm": lgb_label
+    })
 
 @app.route("/train", methods=["POST"])
 def train():
     global xgb_model, lgb_model, label_encoder, scaler
-    data = request.json.get("data")
-    if not data:
+    req_data = request.get_json()
+    if not req_data or "data" not in req_data:
         return jsonify({"error": "缺少訓練資料"}), 400
 
-    X = np.array([d["features"] for d in data])
-    y = np.array([d["label"] for d in data])
+    X = np.array([d["features"] for d in req_data["data"]])
+    y = np.array([d["label"] for d in req_data["data"]])
 
     label_encoder = LabelEncoder()
     y_encoded = label_encoder.fit_transform(y)
@@ -166,19 +158,16 @@ def handle_history_api():
             "big_road": generate_big_road(game_history_backend)
         })
     elif request.method == "POST":
-        data = request.get_json()
-        if not data or "history" not in data:
+        req_data = request.get_json()
+        if not req_data or "history" not in req_data:
             return jsonify({"error": "缺少 history"}), 400
-        game_history_backend = [h.upper() for h in data["history"]]
+        game_history_backend = [h.upper() for h in req_data["history"]]
         return jsonify({"message": "歷史已更新"})
     elif request.method == "DELETE":
-        game_history_backend = []
+        game_history_backend.clear()
         return jsonify({"message": "歷史已清空"})
 
-# 啟動服務（自動適應雲端或本地）
+# 不用 debug=True，讓 gunicorn 接管
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 50000))
-    if not all([os.path.exists(XGB_MODEL_PATH), os.path.exists(LGB_MODEL_PATH),
-                os.path.exists(LABEL_ENCODER_PATH), os.path.exists(SCALER_PATH)]):
-        print("⚠️ 偵測到模型檔案不存在，請先呼叫 /train API 進行訓練")
-    app.run(debug=True, host='0.0.0.0', port=port)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
